@@ -15,7 +15,7 @@ SELECT setval('workers_id_seq', (SELECT MAX(id) FROM workers));
 CREATE OR REPLACE FUNCTION add_worker(parent_id INT, "name" TEXT)
 RETURNS void AS
 $BODY$
-    INSERT INTO workers VALUES (nextval('workers_id_seq'), sql_add_worker.parent_id, sql_add_worker.name);
+    INSERT INTO workers VALUES (nextval('workers_id_seq'), add_worker.parent_id, add_worker.name);
 $BODY$
 LANGUAGE SQL;
     
@@ -24,7 +24,7 @@ LANGUAGE SQL;
 CREATE OR REPLACE FUNCTION change_worker_parent(worker_id INT, new_parent_id INT)
 RETURNS void AS
 $BODY$
-    UPDATE workers SET workers.parent_id = new_parent_id WHERE workers.id = worker_id;
+    UPDATE workers SET parent_id = new_parent_id WHERE id = worker_id;
 $BODY$
 LANGUAGE SQL;
 
@@ -285,11 +285,12 @@ RETURNS void AS
 $BODY$
 DECLARE
 dst_reached BOOLEAN;
+temp_id INT;
 len INT;
 path_ids INT[];
 BEGIN
     dst_reached := false;
-    path_ids := {dst_id};
+    path_ids := ARRAY[dst_id];
 
     CREATE TEMP TABLE IF NOT EXISTS reached_workers (prev_id INT, id SERIAL PRIMARY KEY);
     TRUNCATE TABLE reached_workers;
@@ -318,23 +319,24 @@ BEGIN
         END IF;
     END LOOP;
 
-    -- Здесь массив, чтобы обеспечить правильный порядок. Джойны вроде не обязаны соблюдать
-    -- какие-либо порядки строк(?).
+    -- Здесь массив, чтобы обеспечить правильный порядок, поскольку джойны вроде не обязаны 
+    -- соблюдать какие-либо порядки строк(?).
     WHILE path_ids[array_length(path_ids, 1)] <> src_id LOOP
-        array_append(
-            path_ids, 
-            SELECT 
-                reached_workers.prev_id 
-            FROM 
-                reached_workers 
-            WHERE 
-                reached_workers.id = path_ids[array_length(path_ids, 1)]
-        );
+        SELECT 
+            reached_workers.prev_id 
+        FROM 
+            reached_workers
+        INTO 
+            temp_id
+        WHERE 
+            reached_workers.id = path_ids[array_length(path_ids, 1)];
+
+        path_ids = array_append(path_ids, temp_id);
     END LOOP;
 
     len := array_length(path_ids, 1);
     WHILE len > 0 LOOP
-        RAISE INFO '%', path_ids[i];
+        RAISE INFO '%', path_ids[len];
         len := len - 1;
     END LOOP;
 END;
