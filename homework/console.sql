@@ -55,6 +55,8 @@ create view subordinate_manager as
 select e1.id as id, e2.id as manager_id
 from employee e1 left outer join employee e2 on e1.manager_id = e2.id;
 
+select * from subordinate_manager;
+
 -- absence of a manager
 select * from subordinate_manager
 where manager_id is null;
@@ -63,6 +65,16 @@ where manager_id is null;
 select id from subordinate_manager
 group by id
 having count(manager_id) > 2;
+
+-- absence of cyclic subordination
+with recursive cycles as (
+    select *, array[id] as path, false as is_cycle from employee where manager_id = -1
+    union all
+    select e.id, e.manager_id, e.name, path || e.id, e.id = any(path)
+    from employee e, cycles cl
+    where e.manager_id = cl.id and not is_cycle
+)
+select path from cycles where is_cycle;
 
 
 -- 8
@@ -74,6 +86,39 @@ with recursive subordination_list as (
 )
 select count(id) - 1 as rank from subordination_list;
 
+-- 9
+-- attempt 1
+with recursive subordination_list as (
+    select *, 0 as depth from employee where id = 1000
+    union all
+    select e.id, e.manager_id, e.name, sl.depth + 1 from employee e, subordination_list sl
+    where e.id = sl.manager_id
+)
+select repeat(' ', (select max(depth) from subordination_list) - depth) || name as subordination, depth
+from subordination_list
+order by depth desc;
+
+-- attempt 2
+with recursive subordination_list as (
+    select *, 0 as depth from employee where manager_id = -1
+    union all
+    select e.id, e.manager_id, e.name, sl.depth + 1 from employee e, subordination_list sl
+    where e.manager_id = sl.id
+)
+select repeat(' ', depth) || name as subordination, depth
+from subordination_list
+order by depth asc;
+
+-- attempt 3
+with recursive subordination_list as (
+    select *, text(id) as path, 0 as depth from employee where manager_id = -1
+    union all
+    select e.id, e.manager_id, e.name, concat(sl.path, ',', e.id), sl.depth + 1 from employee e, subordination_list sl
+    where e.manager_id = sl.id
+)
+select repeat(' ', depth) || name as subordination
+from subordination_list
+order by path;
 
 -- 10
 with recursive emps as (select 1000 as emp1, 1023 as emp2),
@@ -99,8 +144,3 @@ select distinct employee.id, employee.name from(
 ) path join employee on path.manager_id = employee.id
 where employee.id != (select emp1 from emps) and
       employee.id != (select emp2 from emps);
-
-
-
-
-
