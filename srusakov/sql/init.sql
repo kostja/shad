@@ -67,8 +67,41 @@ $BODY$
 $BODY$
 LANGUAGE SQL;
 
--- 5) Печатаем цепочку подчинения.
-CREATE OR REPLACE FUNCTION print_command_chain(worker_id INT)
+-- 5.a) Печатаем цепочку подчинения.
+CREATE OR REPLACE FUNCTION command_chain(worker_id INT)
+RETURNS TABLE(chain TEXT) AS
+$BODY$
+    WITH RECURSIVE chain_agg AS (
+        SELECT 
+            workers.id AS id, workers.parent_id AS parent_id, CAST(worker_id AS TEXT) AS chain
+        FROM 
+            workers
+        WHERE 
+            workers.id = worker_id
+        UNION
+            SELECT
+                workers.id, 
+                workers.parent_id, 
+                (
+                    CASE WHEN workers.parent_id <> -1 THEN 
+                        chain || ' -> ' || CAST(workers.parent_id AS TEXT)
+                    ELSE 
+                        chain
+                    END
+                )
+            FROM
+                chain_agg
+            INNER JOIN
+                workers
+            ON
+                chain_agg.parent_id = workers.id AND workers.id <> -1
+
+    ) SELECT chain FROM chain_agg WHERE parent_id = -1;
+$BODY$
+LANGUAGE SQL;
+
+-- 5.b) Печатаем цепочку подчинения. PL/pgSQL версия.
+CREATE OR REPLACE FUNCTION command_chain_cheat(worker_id INT)
 RETURNS void AS
 $BODY$
 DECLARE
@@ -102,22 +135,25 @@ CREATE OR REPLACE FUNCTION dpt_workers_rec(dpt_id INT)
 RETURNS TABLE(id INT, parent_id INT, "name" TEXT) AS
 $BODY$
     WITH RECURSIVE dpt_workers AS (
-	SELECT
-		workers.id,
-		workers.parent_id,
-		workers.name
-	FROM
-		workers
-	WHERE
-		workers.id = dpt_id
-	UNION
         SELECT
             workers.id,
             workers.parent_id,
             workers.name
         FROM
             workers
-        INNER JOIN dpt_workers ON dpt_workers.id = workers.parent_id
+        WHERE
+            workers.id = dpt_id
+        UNION
+            SELECT
+                workers.id,
+                workers.parent_id,
+                workers.name
+            FROM
+                workers
+            INNER JOIN 
+                dpt_workers 
+            ON 
+                dpt_workers.id = workers.parent_id
     ) SELECT
         *
     FROM
@@ -125,9 +161,59 @@ $BODY$
 $BODY$
 LANGUAGE SQL;
 
--- 7) Проверяем 2 аномалии - плохие родители и больше чем одну компоненту. Циклы не осилил, хотя
+-- Проверяем 2 аномалии - плохие родители и больше чем одну компоненту. Выводим плохих родителей,
+-- если есть и кол-во достигнутых людей по сравнению с общим. Сделано через 2 функции.
+-- Нет явной проверки на циклы.
+-- 7.a.1) Выводит -1, если все хорошо.
+CREATE OR REPLACE FUNCTION check_for_anomalies_parent()
+RETURNS TABLE(id INT) AS
+$BODY$
+    -- Проверяем плохих родителей с помощью SELECT *** WHERE NOT EXISTS (select for parent in workers).
+    SELECT 
+        l_workers.parent_id
+    FROM 
+        workers AS l_workers
+    LEFT JOIN 
+        workers AS r_workers ON l_workers.parent_id = r_workers.id
+    WHERE 
+        r_workers.id IS NULL;
+$BODY$
+LANGUAGE SQL;
+
+-- 7.a.2) Выводит 2 одинаковых числа, если все хорошо.
+CREATE OR REPLACE FUNCTION check_for_anomalies_component()
+RETURNS TABLE(r_count INT, i_count INT) AS
+$BODY$
+    -- Проверяем на компоненту, считая сколько людей можно достичь из работника с id = 1.
+    WITH RECURSIVE reached_workers AS (
+        SELECT
+            workers.id,
+            workers.parent_id
+        FROM
+            workers
+        WHERE
+            workers.id = 1
+        UNION
+            SELECT
+                workers.id,
+                workers.parent_id
+            FROM
+                workers
+            INNER JOIN reached_workers ON reached_workers.id = workers.parent_id
+    ) SELECT
+        count(reached_workers.id), count(workers.id)
+    FROM
+        reached_workers
+    RIGHT JOIN
+        workers
+    ON reached_workers.id = workers.id;
+$BODY$
+LANGUAGE SQL;
+
+-- 7.b) Проверяем 2 аномалии - плохие родители и больше чем одну компоненту. Циклы не осилил, хотя
 -- успешная проверка на компоненту в том виде, в котором она здесь сделана говорит, что и циклов нет.
-CREATE OR REPLACE FUNCTION check_for_anomalies()
+-- PL/pgSQL версия.
+CREATE OR REPLACE FUNCTION check_for_anomalies_cheat()
 RETURNS void AS
 $BODY$
 DECLARE
@@ -190,9 +276,31 @@ $BODY$
 LANGUAGE 'plpgsql';
 
 
--- 8) Печатаем ранг работника - итеративно добавляем подвластных работников в табличку пока
+-- 8.a) Печатаем ранг работника - набираем в рекурсивном CTE подвластных работников до момента, когда
+-- не можем, на каждом юнионе запоминаем, на каком именно новый был добавлен + 1. В итоге ранг - это
+-- номер последнего юниона.
+CREATE OR REPLACE FUNCTION rank(worker_id INT)
+RETURNS TABLE(rank INT) AS
+$BODY$
+    WITH RECURSIVE rank_agg AS (
+        SELECT worker_id AS id, 1 AS rank
+        UNION
+            SELECT 
+                workers.id, rank + 1
+            FROM
+                rank_agg
+            INNER JOIN
+                workers
+            ON
+                rank_agg.id = workers.parent_id
+    ) SELECT max(rank) FROM rank_agg;
+$BODY$
+LANGUAGE SQL;
+
+-- 8.b) Печатаем ранг работника - итеративно добавляем подвластных работников в табличку пока
 -- не обнаруживаем, что никого больше не добавили, после чего выводим ранг как кол-во итераций.
-CREATE OR REPLACE FUNCTION print_rank(worker_id INT)
+-- PL/pgSQL версия.
+CREATE OR REPLACE FUNCTION rank_cheat(worker_id INT)
 RETURNS void AS
 $BODY$
 DECLARE
@@ -243,9 +351,45 @@ END;
 $BODY$
 LANGUAGE 'plpgsql';
 
--- 9) Печатаем иерархию отдела. Здесь концептульано даже не понимаю, как сделать это на
--- чистом SQL, потому что надо что-то содержательное печатать. Но выполняется, конечно, миллиард лет :(
-CREATE OR REPLACE FUNCTION print_hierarchy(dpt_id INT, depth INT DEFAULT 0)
+-- 9.a) Печатаем иерархию отдела. Добавляем работников рекурсивным CTE и при добавлении проставляем им
+-- некоторый сортировочный ключ, первая часть которого наследуется от начальника. Таким образом при конечной
+-- сортировке они будут идти сразу после своего начальника. Величина отступа, в свою очередь, определяется
+-- длиной этого ключа.
+CREATE OR REPLACE FUNCTION hierarchy(dpt_id INT)
+RETURNS TABLE(name_line TEXT) AS
+$BODY$
+    WITH RECURSIVE name_agg AS (
+        SELECT
+            workers.id AS id,
+            workers.name AS name_line,
+            '' AS sort_str
+        FROM
+            workers
+        WHERE
+            workers.id = dpt_id
+        UNION
+            SELECT
+                num_workers.id,
+                repeat('   ', length(name_agg.sort_str) + 1) || num_workers.name,
+                name_agg.sort_str || chr(cast(num_workers.num % 256 AS INT))
+            FROM (
+                SELECT 
+                    workers.id, 
+                    workers.parent_id, 
+                    workers.name, 
+                    ROW_NUMBER () OVER () AS num
+                FROM workers
+            ) AS num_workers
+            INNER JOIN
+                name_agg 
+            ON name_agg.id = num_workers.parent_id
+    ) SELECT name_line FROM name_agg ORDER BY sort_str;
+$BODY$
+LANGUAGE SQL;
+
+-- 9.b) Печатаем иерархию отдела. Dыполняется, конечно, миллиард лет :(
+-- PL/pgSQL версия.
+CREATE OR REPLACE FUNCTION hierarchy_cheat(dpt_id INT, depth INT DEFAULT 0)
 RETURNS void AS
 $BODY$
 DECLARE
@@ -279,8 +423,66 @@ END;
 $BODY$
 LANGUAGE 'plpgsql';
 
--- 10) Печатаем наикратчайший путь между двумя работниками.
-CREATE OR REPLACE FUNCTION print_shortest_path(src_id INT, dst_id INT)
+-- 10.a) Печатаем наикратчайший путь между двумя работниками. Работаем в предположении, что у вершин
+-- есть общий родитель и в графе нет циклов.
+-- Работаем следующим образом - строим две таблички со всеми путями от источника и цели до их родителей,
+-- записывая длину и путь. После этого делаем джойн на них, пересекая по айдишнику концов путей и сортируем
+-- по сумме путей до этого айдишника. Путь через наименьшего общего руководителя тогда - это комбинация 
+-- путей до этого айдишника от источника + путь от айдишника до таргета(разница в направлениях отражается
+-- в CTE, где добавляем к пути слева или справа).
+-- Звездочка для супер явного указания, что является наименьшим руководителем, но можно легко убрать.
+CREATE OR REPLACE FUNCTION shortest_path(src_id INT, dst_id INT)
+RETURNS TABLE(shortest_path TEXT) AS
+$BODY$
+    WITH RECURSIVE src_half_path AS (
+        SELECT
+            src_id AS id,
+            CAST(src_id AS TEXT) AS "path",
+            0 AS len
+        UNION
+            SELECT 
+                workers.parent_id,
+                src_half_path.path || '->' || CAST(workers.parent_id AS TEXT),
+                len + 1
+            FROM 
+                src_half_path
+            INNER JOIN
+                workers
+            ON
+                src_half_path.id = workers.id
+    ), dst_half_path AS (
+        SELECT
+            dst_id AS id,
+            CAST(dst_id AS TEXT) AS "path",
+            0 AS len
+        UNION
+            SELECT 
+                workers.parent_id,
+                CAST(workers.parent_id AS TEXT) || '->' || dst_half_path.path,
+                len + 1
+            FROM 
+                dst_half_path
+            INNER JOIN
+                workers
+            ON
+                dst_half_path.id = workers.id
+    ) SELECT
+            src_half_path.path || ' * ' || dst_half_path.path
+        FROM 
+            src_half_path 
+        INNER JOIN 
+            dst_half_path
+        ON
+            src_half_path.id = dst_half_path.id
+        ORDER BY 
+            src_half_path.len + dst_half_path.len
+        LIMIT 1;
+$BODY$
+LANGUAGE SQL;
+
+-- 10.b) Печатаем наикратчайший путь между двумя работниками.
+-- PL/pgSQL версия.
+CREATE OR REPLACE FUNCTION shortest_path_cheat(src_id INT, dst_id INT)
 RETURNS void AS
 $BODY$
 DECLARE
