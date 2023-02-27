@@ -57,8 +57,6 @@ create view subordinate_manager as
 select e1.id as id, e2.id as manager_id
 from employee e1 left outer join employee e2 on e1.manager_id = e2.id;
 
-select * from subordinate_manager;
-
 -- absence of a manager
 select * from subordinate_manager
 where manager_id is null;
