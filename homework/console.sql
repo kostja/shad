@@ -28,9 +28,11 @@ union all
 select * from employee where manager_id = (select * from manager);
 
 -- 4
+select id, name from employee
+where id in (
 select id from employee
 except
-select manager_id from employee;
+select manager_id from employee);
 
 -- 5
 with recursive subordination_list as (
@@ -43,7 +45,7 @@ select * from subordination_list;
 
 -- 6
 with recursive subordination_list as (
-    select * from employee where id = 1
+    select * from employee where id = 130
     union all
     select e.id, e.manager_id, e.name from employee e, subordination_list sl
     where e.manager_id = sl.id
@@ -79,7 +81,7 @@ select path from cycles where is_cycle;
 
 -- 8
 with recursive subordination_list as (
-    select * from employee where id = 19550
+    select * from employee where id = 19500
     union all
     select e.id, e.manager_id, e.name from employee e, subordination_list sl
     where e.id = sl.manager_id
@@ -87,29 +89,6 @@ with recursive subordination_list as (
 select count(id) - 1 as rank from subordination_list;
 
 -- 9
--- attempt 1
-with recursive subordination_list as (
-    select *, 0 as depth from employee where id = 1000
-    union all
-    select e.id, e.manager_id, e.name, sl.depth + 1 from employee e, subordination_list sl
-    where e.id = sl.manager_id
-)
-select repeat(' ', (select max(depth) from subordination_list) - depth) || name as subordination, depth
-from subordination_list
-order by depth desc;
-
--- attempt 2
-with recursive subordination_list as (
-    select *, 0 as depth from employee where manager_id = -1
-    union all
-    select e.id, e.manager_id, e.name, sl.depth + 1 from employee e, subordination_list sl
-    where e.manager_id = sl.id
-)
-select repeat(' ', depth) || name as subordination, depth
-from subordination_list
-order by depth asc;
-
--- attempt 3
 with recursive subordination_list as (
     select *, text(id) as path, 0 as depth from employee where manager_id = -1
     union all
