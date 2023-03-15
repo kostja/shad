@@ -16,7 +16,7 @@ INSERT INTO employees VALUES (1240605, 2, 'John John');
 -- 2. Перевести сотрудника из отдела в отдел. В случае перевода руководителя,
 -- переводятся все его подчинённые.
 
-UPDATE employees SET supervisor_id = 2 WHERE id = 1240604;;
+UPDATE employees SET supervisor_id = 2 WHERE id = 1240604;
 
 -- 3. Вывести отдел - начальник, все непосредственные подчинённые
 
@@ -106,7 +106,7 @@ WITH RECURSIVE hierarchy AS (
     SELECT *, 0 AS depth FROM employees
     WHERE supervisor_id = -1 UNION
     SELECT e.id, e.supervisor_id, e.name, h.depth + 1 
-    FROM employees e, hierarchy h WHERE e.supervisor_id = h.id
+    FROM employees e INNER JOIN hierarchy h ON e.supervisor_id = h.id
 )
 SELECT REPEAT(' ', depth) || name
 FROM hierarchy ORDER BY depth LIMIT 10;
