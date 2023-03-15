@@ -1,0 +1,126 @@
+CREATE TABLE "main" (
+  "id" integer NOT NULL,
+  "parent_id" integer NOT NULL,
+  "name" text NOT NULL
+);
+
+COPY main
+FROM '/data/graph.csv'
+WITH (FORMAT csv);
+
+-- 1. Добавить сотрудника.
+
+INSERT INTO main VALUES(<id>, <parent_id>, <name>);
+
+-- 2. Перевести сотрудника из отдела в отдел. В случае перевода руководителя,
+--    переводятся все его подчинённые.
+
+UPDATE main SET parent_id = <new_parent_id> WHERE main.id = <id>;
+
+-- 3. Вывести отдел - начальник, все непосредственные подчинённые
+
+SELECT id, name FROM main WHERE parent_id = <id> OR id = <id>;
+
+-- 4. Вывести список всех "листовых" узлов дерева (сотрудники не имеющие
+--    подчинённых)
+
+SELECT parents.id, parents.name
+FROM main as parents LEFT JOIN main as children ON parents.id = children.parent_id
+WHERE children.id is NULL;
+
+-- 5. Вывести список подчинения - руководитель, руководитель руководителя,
+--    и т.д. до вершины иерархии
+WITH RECURSIVE path AS (
+    SELECT id, parent_id, name FROM main WHERE id = <id>
+    UNION
+    SELECT main.id, main.parent_id, main.name FROM main INNER JOIN path ON path.parent_id = main.id
+) SELECT * FROM path;
+
+
+-- 6. Вывести количество сотрудников в отделе, *включая подотделы*
+
+WITH RECURSIVE subtree AS (
+    SELECT id, name FROM main WHERE id = <id>
+    UNION
+    SELECT main.id, main.name FROM main INNER JOIN subtree ON subtree.id = main.parent_id
+) SELECT COUNT(*) FROM subtree;
+
+-- 8. Вывести "ранг" сотрудника - глубину подчинения
+
+WITH RECURSIVE path AS (
+    SELECT id, parent_id, name FROM main WHERE id = <id>
+    UNION
+    SELECT main.id, main.parent_id, main.name
+    FROM main INNER JOIN path ON path.parent_id = main.id
+) SELECT COUNT(*) FROM path;
+
+-- 9. Вывести иерархию в графическом виде (одно значение - на одной
+--    строке, отсортировано в порядке подчинения, количество отступов
+--    перед именем сотрудника - степень подчинения в иерархии 
+WITH RECURSIVE pretty_view AS (
+    SELECT id, name, '' as shift FROM main WHERE id = <id>
+    UNION
+    SELECT main.id, main.name, chr(9) /* tab */ || pretty_view.shift as shift
+    FROM main INNER JOIN pretty_view ON pretty_view.id = main.parent_id
+) SELECT pretty_view.id, pretty_view.shift || pretty_view.name FROM pretty_view;
+
+-- 10. Вывести "путь" между двумя сотрудниками - всех непосредственных и 
+--     промежуточных руководителей сотрудников.
+
+-- root_path возвращает путь от вершины <from_id> до корня
+-- поле depth считает глубину в обратную сторону
+-- (то есть для <from_id> равна нулю и увеличивается в сторону корня)
+CREATE OR REPLACE FUNCTION root_path(from_id INT)
+	RETURNS TABLE (
+		id INT,
+		parent_id INT,
+        name TEXT,
+        depth INT
+	) 
+	LANGUAGE plpgsql
+AS $$
+BEGIN
+	RETURN QUERY 
+            WITH RECURSIVE path AS (
+                SELECT main.id, main.parent_id, main.name, 0 as depth
+                FROM main WHERE main.id = from_id
+                UNION
+                SELECT main.id, main.parent_id, main.name, path.depth + 1 as depth
+                FROM main INNER JOIN path ON path.parent_id = main.id
+            ) SELECT * FROM path;
+
+END;$$;
+
+
+-- все ноды состоящие в путях и их глубины
+WITH all_nodes(first_id, first_parent_id, first_name, first_depth,
+               second_id, second_parent_id, second_name, second_depth) AS (
+    SELECT *
+    FROM root_path(<first_id>) as first FULL JOIN root_path(<second_id>) as second
+    ON first.id = second.id
+),
+-- пересечение путей (нужно чтобы найти LCA)
+common_nodes(id, parent_id, name, depth) AS (
+    SELECT first_id, first_parent_id, first_name, GREATEST(first_depth, second_depth) as depth
+    FROM all_nodes
+    WHERE first_id = second_id
+),
+-- ноды только из первого пути
+only_first(id, parent_id, name, depth) AS (
+    SELECT first_id, first_parent_id, first_name, first_depth
+    FROM all_nodes
+    WHERE second_id is NULL
+),
+-- ноды только из второго пути
+only_second(id, parent_id, name, depth) AS (
+    SELECT second_id, second_parent_id, second_name, second_depth
+    FROM all_nodes
+    WHERE first_id is NULL
+)
+SELECT * FROM common_nodes WHERE depth = (SELECT MIN(depth) from common_nodes)
+UNION
+SELECT * FROM only_first
+UNION
+SELECT * FROM only_second;
+
+
