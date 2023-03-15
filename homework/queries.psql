@@ -1,0 +1,157 @@
+CREATE TABLE IF NOT EXISTS employees(
+    id INTEGER PRIMARY KEY,
+    supervisor_id INTEGER,
+    name TEXT
+);
+
+COPY employees FROM '/home/dword/Desktop/Files/reps/shad/homework/graph.csv' DELIMITER ',';
+
+SELECT MAX(id) FROM employees;
+
+-- 1. Добавить сотрудника.
+
+INSERT INTO employees VALUES (1240604, 1, 'John Doe');
+INSERT INTO employees VALUES (1240605, 2, 'John John');
+
+-- 2. Перевести сотрудника из отдела в отдел. В случае перевода руководителя,
+-- переводятся все его подчинённые.
+
+UPDATE employees SET supervisor_id = 2 WHERE id = 1240604;;
+
+-- 3. Вывести отдел - начальник, все непосредственные подчинённые
+
+SELECT * FROM employees WHERE supervisor_id = 2 UNION (SELECT * FROM employees WHERE id = 2);
+
+-- 4. Вывести список всех "листовых" узлов дерева (сотрудники не имеющие
+-- подчинённых)
+
+WITH supervisors AS (
+    SELECT e1.id, e1.supervisor_id, e1.name
+    FROM employees e1 
+    INNER JOIN employees e2 ON (e1.id = e2.supervisor_id)
+)
+SELECT * FROM employees EXCEPT SELECT * FROM supervisors LIMIT 10;
+
+-- 5. Вывести список подчинения - руководитель, руководитель руководителя,
+-- и т.д. до вершины иерархии
+
+WITH RECURSIVE hierarchy AS (
+    SELECT * FROM employees WHERE id = 100 UNION
+    SELECT e.id, e.supervisor_id, e.name FROM employees e 
+    INNER JOIN hierarchy h ON e.id = h.supervisor_id
+)
+SELECT * FROM hierarchy;
+
+-- 6. Вывести количество сотрудников в отделе, *включая подотделы*
+
+WITH RECURSIVE subdivisions AS (
+    SELECT id, supervisor_id FROM employees WHERE id = 5 UNION
+    SELECT e.id, e.supervisor_id FROM employees e
+    INNER JOIN subdivisions s ON e.supervisor_id = s.id
+)
+SELECT COUNT(*) FROM subdivisions;
+
+-- 7. Проверить граф подчинения на отсутствие аномалий (двойное подчинение,
+-- отсутствие руководителя и т.д.).
+
+-- Двойное подчинение
+
+WITH employees_supervisors AS (
+    SELECT e1.id AS id, e2.id AS supervisor_id 
+    FROM employees e1 INNER JOIN employees e2
+    ON e1.supervisor_id = e2.id
+)
+SELECT id FROM employees_supervisors
+GROUP BY id HAVING COUNT(supervisor_id) > 2;
+
+-- Отсутствие руководителя
+
+SELECT id FROM employees WHERE supervisor_id is NULL;
+
+-- Индикатор циклической зависимости
+
+WITH RECURSIVE tree AS (
+    SELECT id, supervisor_id, false AS flag FROM employees WHERE supervisor_id = -1 UNION
+    (
+        WITH visited AS (
+            SELECT id, supervisor_id FROM tree
+        ),
+        children AS (
+            SELECT e.id, e.supervisor_id, false AS flag FROM employees e 
+            INNER JOIN visited ON visited.id = e.supervisor_id
+        ),
+        cycles AS (
+            SELECT children.id, children.supervisor_id, true AS flag 
+            FROM children INNER JOIN visited ON visited.supervisor_id = children.id
+        )
+        SELECT * FROM children UNION SELECT * FROM cycles
+    )
+)
+SELECT id FROM tree WHERE flag = true LIMIT 10;
+
+-- 8. Вывести "ранг" сотрудника - глубину подчинения
+
+WITH RECURSIVE hierarchy AS (
+    SELECT * FROM employees WHERE id = 100 UNION
+    SELECT e.id, e.supervisor_id, e.name FROM employees e 
+    INNER JOIN hierarchy h ON e.id = h.supervisor_id
+)
+SELECT COUNT(*) - 1 FROM hierarchy;
+
+-- 9. Вывести иерархию в графическом виде (одно значение - на одной
+-- строке, отсортировано в порядке подчинения, количество отступов
+-- перед именем сотрудника - степень подчинения в иерархии 
+
+WITH RECURSIVE hierarchy AS (
+    SELECT *, 0 AS depth FROM employees
+    WHERE supervisor_id = -1 UNION
+    SELECT e.id, e.supervisor_id, e.name, h.depth + 1 
+    FROM employees e, hierarchy h WHERE e.supervisor_id = h.id
+)
+SELECT REPEAT(' ', depth) || name
+FROM hierarchy ORDER BY depth LIMIT 10;
+
+-- 10. Вывести "путь" между двумя сотрудниками - всех непосредственных и 
+-- промежуточных руководителей сотрудников.
+
+-- Пусть выводится следующим образом: от сотрудника id1 до LCA(id1, id2), от LCA(id1, id2) до сотрудника id2 
+
+WITH RECURSIVE ancestors1 AS (
+    SELECT id, supervisor_id, name, 1 AS height 
+    FROM employees WHERE id = 1240604 UNION
+    SELECT e.id, e.supervisor_id, e.name, height + 1 FROM employees e 
+    INNER JOIN ancestors1 a ON e.id = a.supervisor_id
+),
+employees_total_count AS (
+    SELECT COUNT(*) AS total_count FROM employees
+),
+ancestors2 AS (
+    SELECT id, supervisor_id, name, 4 * total_count AS height 
+    FROM employees, employees_total_count WHERE id = 1240605 UNION
+    SELECT e.id, e.supervisor_id, e.name, height - 1 FROM employees e 
+    INNER JOIN ancestors2 a ON e.id = a.supervisor_id
+),
+common_ancestors AS (
+    SELECT ancestors1.id, ancestors1.supervisor_id, ancestors1.name
+    FROM ancestors1 INNER JOIN ancestors2 ON ancestors1.id = ancestors2.id 
+),
+lca AS (
+    WITH supervisors AS (
+        SELECT a1.id, a1.supervisor_id, a1.name
+        FROM common_ancestors a1
+        INNER JOIN common_ancestors a2 ON a1.id = a2.supervisor_id
+    )
+    SELECT id, supervisor_id, name FROM common_ancestors EXCEPT SELECT * FROM supervisors
+),
+path1 AS (
+    SELECT * FROM ancestors1 WHERE id NOT IN (SELECT id FROM common_ancestors)
+),
+path2 AS (
+    SELECT * FROM ancestors2 WHERE id NOT IN (SELECT id FROM common_ancestors)
+)
+SELECT id, supervisor_id, name FROM (
+    SELECT * FROM path1 UNION 
+    SELECT lca.id, lca.supervisor_id, lca.name, 2 * total_count 
+    FROM lca, employees_total_count UNION 
+    SELECT * FROM path2
+) AS sorted_path ORDER BY height;
