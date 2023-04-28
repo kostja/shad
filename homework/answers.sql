@@ -10,7 +10,7 @@ $$;
 CREATE OR REPLACE PROCEDURE load_table()
 LANGUAGE SQL AS $$
 COPY workers(id, prev, name)
-FROM '/graph.csv'
+FROM 'graph.csv'
 DELIMITER ',';
 $$;
 
@@ -87,7 +87,6 @@ SELECT id, name FROM bosses
 ORDER BY level;
 $$ LANGUAGE sql;
 
---Alternative;
 CREATE OR REPLACE FUNCTION get_bosses(boss_id int)
 RETURNS table(worker_id int, worker_name varchar(100))
  AS $$
@@ -126,7 +125,6 @@ $$ LANGUAGE sql;
 --Seven task
 CREATE OR REPLACE PROCEDURE check_workers()
  AS $$
-
 BEGIN
    IF ((SELECT COUNT(*) FROM workers WHERE prev = -1) > 1 OR (((SELECT COUNT(*) FROM workers WHERE prev = -1) = 0) AND ((SELECT COUNT(*) FROM workers) > 0))) 
    THEN
@@ -144,8 +142,9 @@ BEGIN
    (
       SELECT COUNT(id) FROM workers
    ) THEN
-	RAISE EXCEPTION 'cannot have a multiple or zero count of start vertex';
+	RAISE EXCEPTION 'Not connected graph';
    END IF;
+   RAISE NOTICE 'Good graph!';
 END;
 $$
 LANGUAGE plpgsql;
@@ -165,6 +164,22 @@ WITH RECURSIVE bosses AS (
       FROM workers as w
       INNER JOIN bosses as b
       ON w.id = b.prev
+)
+SELECT MAX(level) FROM bosses;
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION get_deep_rank(boss_id int)
+RETURNS table(worker_rank int)
+ AS $$
+WITH RECURSIVE bosses AS (
+  SELECT
+      boss_id as id, -1, 1 AS level
+  UNION
+      SELECT
+         w.id, w.prev, level + 1
+      FROM workers as w
+      INNER JOIN bosses as b
+      ON w.prev = b.id
 )
 SELECT MAX(level) FROM bosses;
 $$ LANGUAGE sql;
