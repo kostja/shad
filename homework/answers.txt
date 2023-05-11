@@ -1,0 +1,208 @@
+CREATE TABLE "main" (
+  "id" integer NOT NULL,
+  "parent_id" integer NOT NULL,
+  "name" text NOT NULL
+);
+
+COPY main
+FROM '/data/graph.csv'
+WITH (FORMAT csv);
+
+-- 1. Добавить сотрудника.
+CREATE OR REPLACE FUNCTION add_employee(id INT, parent_id INT, name TEXT)
+	RETURNS VOID
+	LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO main VALUES(id, parent_id, name);
+END;$$;
+
+-- SELECT add_employee(1240604, 2, 'Alex Gryzlov');
+
+-- 2. Перевести сотрудника из отдела в отдел. В случае перевода руководителя,
+--    переводятся все его подчинённые.
+CREATE OR REPLACE FUNCTION move_node(node_id INT, new_parent_id INT)
+	RETURNS VOID
+	LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE main SET parent_id = new_parent_id WHERE main.id = node_id;
+END;$$
+
+-- SELECT move_node(1240604, 1);
+
+-- 3. Вывести отдел - начальник, все непосредственные подчинённые
+
+CREATE OR REPLACE FUNCTION get_closest_subordinates(root_id INT)
+	RETURNS TABLE (
+		id INT,
+                name TEXT
+	) 
+	LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY 
+        SELECT main.id, main.name FROM main
+        WHERE main.parent_id = root_id OR main.id = root_id;
+END;$$;
+
+-- SELECT * FROM get_closest_subordinates(1);
+
+-- 4. Вывести список всех "листовых" узлов дерева (сотрудники не имеющие
+--    подчинённых)
+CREATE OR REPLACE FUNCTION get_leaves()
+	RETURNS TABLE (
+		id INT,
+        name TEXT
+	) 
+	LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY SELECT parents.id, parents.name
+        FROM main as parents LEFT JOIN main as children ON parents.id = children.parent_id
+        WHERE children.id is NULL;
+END;$$;
+
+-- SELECT * FROM get_leaves();
+
+-- 5. Вывести список подчинения - руководитель, руководитель руководителя,
+--    и т.д. до вершины иерархии
+CREATE OR REPLACE FUNCTION get_path_to_root(node_id INT)
+	RETURNS TABLE (
+		id INT,
+                parent_id INT,
+                name TEXT
+	) 
+	LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY WITH RECURSIVE path AS (
+        SELECT main.id, main.parent_id, main.name FROM main WHERE main.id = node_id
+        UNION
+        SELECT main.id, main.parent_id, main.name
+        FROM main INNER JOIN path ON path.parent_id = main.id
+    ) SELECT * FROM path;
+END;$$;
+-- SELECT * FROM get_path_to_root(5);
+
+
+-- 6. Вывести количество сотрудников в отделе, *включая подотделы*
+CREATE OR REPLACE FUNCTION get_subtree_size(node_id INT)
+	RETURNS INT
+	LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN (WITH RECURSIVE subtree AS (
+        SELECT id, name FROM main WHERE id = node_id
+        UNION
+        SELECT main.id, main.name FROM main INNER JOIN subtree ON subtree.id = main.parent_id
+    ) SELECT COUNT(*) FROM subtree);
+END;$$;
+-- SELECT * FROM get_subtree_size(1);
+
+-- 8. Вывести "ранг" сотрудника - глубину подчинения
+CREATE OR REPLACE FUNCTION get_node_depth(node_id INT)
+	RETURNS INT
+	LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN (WITH RECURSIVE path AS (
+        SELECT id, parent_id, name FROM main WHERE id = node_id
+        UNION
+        SELECT main.id, main.parent_id, main.name
+        FROM main INNER JOIN path ON path.parent_id = main.id
+     ) SELECT COUNT(*) FROM path);
+END;$$;
+-- SELECT * FROM get_node_depth(5);
+
+-- 9. Вывести иерархию в графическом виде (одно значение - на одной
+--    строке, отсортировано в порядке подчинения, количество отступов
+--    перед именем сотрудника - степень подчинения в иерархии 
+CREATE OR REPLACE FUNCTION get_pretty_subtree_view(root_id INT)
+	RETURNS TABLE (
+		id INT,
+        name TEXT
+	) 
+	LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY WITH RECURSIVE pretty_view AS (
+        SELECT main.id, main.name, '' as shift FROM main WHERE main.id = root_id
+        UNION
+        SELECT main.id, main.name, chr(9) /* tab */ || pretty_view.shift as shift
+        FROM main INNER JOIN pretty_view ON pretty_view.id = main.parent_id
+    ) SELECT pretty_view.id, pretty_view.shift || pretty_view.name FROM pretty_view;
+END;$$;
+-- SELECT * from get_pretty_subtree_view(5);
+
+-- 10. Вывести "путь" между двумя сотрудниками - всех непосредственных и 
+--     промежуточных руководителей сотрудников.
+
+-- root_path возвращает путь от вершины <from_id> до корня
+-- поле depth считает глубину в обратную сторону
+-- (то есть для <from_id> равна нулю и увеличивается в сторону корня)
+CREATE OR REPLACE FUNCTION root_path(from_id INT)
+	RETURNS TABLE (
+		id INT,
+		parent_id INT,
+        name TEXT,
+        depth INT
+	) 
+	LANGUAGE plpgsql
+AS $$
+BEGIN
+	RETURN QUERY 
+            WITH RECURSIVE path AS (
+                SELECT main.id, main.parent_id, main.name, 0 as depth
+                FROM main WHERE main.id = from_id
+                UNION
+                SELECT main.id, main.parent_id, main.name, path.depth + 1 as depth
+                FROM main INNER JOIN path ON path.parent_id = main.id
+            ) SELECT * FROM path;
+
+END;$$;
+
+
+CREATE OR REPLACE FUNCTION get_nodes_path(from_id INT, to_id INT)
+	RETURNS TABLE (
+		id INT,
+                parent_id INT,
+                name TEXT,
+                node_depth INT
+	) 
+	LANGUAGE plpgsql
+AS $$
+BEGIN
+-- все ноды состоящие в путях и их глубины
+RETURN QUERY WITH all_nodes(first_id, first_parent_id, first_name, first_depth,
+               second_id, second_parent_id, second_name, second_depth) AS (
+    SELECT *
+    FROM root_path(from_id) as first FULL JOIN root_path(to_id) as second
+    ON first.id = second.id
+),
+-- пересечение путей (нужно чтобы найти LCA)
+common_nodes(id, parent_id, name, depth) AS (
+    SELECT first_id, first_parent_id, first_name, GREATEST(first_depth, second_depth) as depth
+    FROM all_nodes
+    WHERE first_id = second_id
+),
+-- ноды только из первого пути
+only_first(id, parent_id, name, depth) AS (
+    SELECT first_id, first_parent_id, first_name, first_depth
+    FROM all_nodes
+    WHERE second_id is NULL
+),
+-- ноды только из второго пути
+only_second(id, parent_id, name, depth) AS (
+    SELECT second_id, second_parent_id, second_name, second_depth
+    FROM all_nodes
+    WHERE first_id is NULL
+)
+SELECT * FROM common_nodes WHERE depth = (SELECT MIN(depth) from common_nodes)
+UNION
+SELECT * FROM only_first
+UNION
+SELECT * FROM only_second;
+END;$$;
+
+-- SELECT * from get_nodes_path(1, 10);
